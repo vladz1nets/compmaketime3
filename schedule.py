@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 import colorsys
+import time
+import os
 from collections import defaultdict
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, PatternFill
@@ -265,4 +267,7 @@ def FindOptimalLoadingDiagram():
     # Вивід результатів (можна розширити за потреби)
     print("Оптимальний порядок обробки деталей:", " -> ".join([PartNames[i] for i in bestPerm]))
     print("Загальний час виготовлення (makespan):", bestTime[0], "хвилин")
-    DrawGanttChartTable(bestScheduleArray, bestTime[0])
+    # Генеруємо унікальне ім'я файлу з урахуванням часу
+    output_filename = f'GanttChart_{int(time.time())}.xlsx'
+    DrawGanttChartTable(bestScheduleArray, bestTime[0], output_filename=output_filename)
+    return output_filename  # Повертаємо ім'я згенерованого файлу

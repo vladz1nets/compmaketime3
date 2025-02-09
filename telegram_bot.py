@@ -2,7 +2,7 @@ import os
 import logging
 import json
 
-from telegram import Update, InputFile
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -21,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Стан розмови
-(WAIT_QPART, WAIT_DETAIL_FILES, WAIT_SHOP_NAME, WAIT_SHOP_ACTION) = range(4)
+(WAIT_FOR_SHOP_NAME_OR_QPART, WAIT_QPART, WAIT_DETAIL_FILES, WAIT_SHOP_NAME, WAIT_SHOP_ACTION) = range(5)
 
 # Створюємо тимчасову директорію для файлів, якщо її немає
 if not os.path.exists('temp'):
@@ -29,11 +29,50 @@ if not os.path.exists('temp'):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
-        "Привіт, я твій помічник по роботі в цеху.\n"
+        "Привіт, я твій помічник по роботі в цеху. "
         "Передай мені файли, що містять інформацію про твої вироби – я допоможу з плануванням.\n\n"
-        "Спочатку надішли, будь ласка, файл **Q_part** (Excel)."
+        "Якщо хочете переглянути усі результати обробки деталей певного цеху, то напишіть назву цеху або "
+        "надішліть, будь ласка, новий файл **Q_part** (Excel) для нового обрахунку."
     )
-    return WAIT_QPART
+    return WAIT_FOR_SHOP_NAME_OR_QPART
+
+async def handle_qpart_or_shop_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.message.document:
+        # Користувач надіслав файл
+        return await handle_qpart(update, context)
+    elif update.message.text:
+        # Користувач ввів назву цеху
+        shop_name = update.message.text.strip()
+        user_id = update.message.from_user.id
+        rows = db.get_user_shops(user_id)
+        shop_found = False
+        for row_shop_name, results_json in rows:
+            if row_shop_name == shop_name:
+                shop_found = True
+                results_list = json.loads(results_json) if results_json else []
+                if not results_list:
+                    await update.message.reply_text(f"У цеху '{shop_name}' немає збережених результатів.")
+                else:
+                    await update.message.reply_text(f"Результати для цеху '{shop_name}':")
+                    for result_file in results_list:
+                        # Перевірити, чи файл існує
+                        if os.path.exists(result_file):
+                            with open(result_file, 'rb') as f:
+                                await update.message.reply_document(document=f)
+                            # Після надсилання можемо видалити файл, якщо це тимчасовий файл
+                            # os.remove(result_file)
+                        else:
+                            await update.message.reply_text(f"Файл {os.path.basename(result_file)} не знайдено.")
+                break
+        if not shop_found:
+            await update.message.reply_text(
+                f"Цех '{shop_name}' не знайдено. Будь ласка, надішліть новий файл **Q_part** (Excel) для нового обрахунку."
+            )
+            return WAIT_FOR_SHOP_NAME_OR_QPART
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("Будь ласка, надішліть файл **Q_part** або введіть назву цеху.")
+        return WAIT_FOR_SHOP_NAME_OR_QPART
 
 async def handle_qpart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     document = update.message.document
@@ -82,12 +121,12 @@ async def done_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     for i, path in enumerate(context.user_data['detail_files'], start=1):
         sched.details_file_path_list.append((i, path))
     try:
-        sched.FindOptimalLoadingDiagram()
+        schedule_file = sched.FindOptimalLoadingDiagram()
     except Exception as e:
         logger.error("Помилка при розрахунках: %s", e)
         await update.message.reply_text(f"Сталася помилка під час розрахунків: {e}")
         return ConversationHandler.END
-    context.user_data['schedule_file'] = 'GanttChart.xlsx'
+    context.user_data['schedule_file'] = schedule_file
     await update.message.reply_text("Розрахунки завершено. Вкажіть, у який цех зберегти результати:")
     return WAIT_SHOP_NAME
 
@@ -97,7 +136,6 @@ async def handle_shop_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text("Бажаєте створити новий цех чи відредагувати існуючий?\n"
                                     "Введіть 'створити' або 'редагувати'.")
     return WAIT_SHOP_ACTION
-
 
 async def handle_shop_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     action = update.message.text.strip().lower()
@@ -127,7 +165,6 @@ async def handle_shop_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_document(document=f)
     return ConversationHandler.END
 
-
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Операцію скасовано.")
     return ConversationHandler.END
@@ -141,7 +178,7 @@ async def mywork(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     response = "Ваші цехи:\n"
     for shop_name, results_json in rows:
         results_list = json.loads(results_json) if results_json else []
-        response += f"Цех: {shop_name}\nРезультати: {', '.join(results_list)}\n\n"
+        response += f"Цех: {shop_name}\nРезультати: {', '.join([os.path.basename(f) for f in results_list])}\n\n"
     await update.message.reply_text(response)
 
 def main():
@@ -155,6 +192,10 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
+            WAIT_FOR_SHOP_NAME_OR_QPART: [
+                MessageHandler(filters.Document.ALL, handle_qpart_or_shop_name),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_qpart_or_shop_name)
+            ],
             WAIT_QPART: [MessageHandler(filters.Document.ALL, handle_qpart)],
             WAIT_DETAIL_FILES: [
                 MessageHandler(filters.Document.ALL, handle_detail_file),

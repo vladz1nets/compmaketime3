@@ -1,5 +1,6 @@
 import sqlite3
 import json
+import os
 
 DB_PATH = "shops.db"
 
@@ -23,7 +24,8 @@ def add_shop(user_id, shop_name, schedule_file):
     if c.fetchone() is not None:
         conn.close()
         return False, "Цей цех вже існує."
-    results_list = [schedule_file]
+    # Зберігаємо абсолютний шлях до файлу
+    results_list = [os.path.abspath(schedule_file)]
     results_json = json.dumps(results_list)
     c.execute("INSERT INTO shops (user_id, shop_name, results) VALUES (?, ?, ?)", (user_id, shop_name, results_json))
     conn.commit()
@@ -40,7 +42,8 @@ def update_shop(user_id, shop_name, schedule_file):
         return False, "Цей цех не знайдено."
     results_json = row[0]
     results_list = json.loads(results_json) if results_json else []
-    results_list.append(schedule_file)
+    # Зберігаємо абсолютний шлях до файлу
+    results_list.append(os.path.abspath(schedule_file))
     new_results_json = json.dumps(results_list)
     c.execute("UPDATE shops SET results=? WHERE user_id=? AND shop_name=?", (new_results_json, user_id, shop_name))
     conn.commit()
@@ -58,3 +61,4 @@ def get_user_shops(user_id):
 # Ініціалізація бази при імпорті модуля
 if __name__ == "__main__":
     init_db()
+
