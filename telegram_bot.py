@@ -2,6 +2,9 @@ import os
 import logging
 import json
 import asyncio
+import uuid  # Додаємо модуль для генерації унікальних ідентифікаторів
+import schedule as sched
+import db
 
 from telegram import Update
 from telegram.ext import (
@@ -12,9 +15,6 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-
-import schedule as sched
-import db
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -41,7 +41,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "Надішліть файл **Q_part** (Excel) або введіть назву цеху, щоб отримати результати."
     )
     return WAIT_FOR_SHOP_NAME_OR_QPART
-
 
 async def handle_qpart_or_shop_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.message.document:
@@ -76,14 +75,14 @@ async def handle_qpart_or_shop_name(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text("Будь ласка, надішліть файл **Q_part** або введіть назву цеху.")
         return WAIT_FOR_SHOP_NAME_OR_QPART
 
-
 async def handle_qpart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     document = update.message.document
     if not (document.file_name.endswith('.xlsx') or document.file_name.endswith('.xls')):
         await update.message.reply_text("Файл має бути формату Excel (.xlsx або .xls). Спробуйте ще раз.")
         return WAIT_FOR_SHOP_NAME_OR_QPART
     file = await document.get_file()
-    file_path = os.path.join('temp', f"{update.message.from_user.id}_Q_part_{document.file_name}")
+    unique_id = uuid.uuid4().hex  # Генеруємо унікальний ідентифікатор
+    file_path = os.path.join('temp', f"{update.message.from_user.id}_Q_part_{unique_id}_{document.file_name}")
     await file.download_to_drive(custom_path=file_path)
     context.user_data['q_part_file'] = file_path
     await update.message.reply_text(
@@ -91,9 +90,8 @@ async def handle_qpart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         "Надсилайте їх по одному. Коли завершите, введіть команду /done."
     )
     context.user_data['detail_files'] = []
-    context.user_data['file_numbers'] = {}  # Ініціалізуємо словник для номерів файлів
+    context.user_data['file_numbers'] = {}
     return WAIT_DETAIL_FILES
-
 
 async def handle_detail_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     document = update.message.document
@@ -101,22 +99,25 @@ async def handle_detail_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Файл має бути формату Excel (.xlsx або .xls).")
         return WAIT_DETAIL_FILES
     file = await document.get_file()
-    file_path = os.path.join('temp', f"{update.message.from_user.id}_detail_{document.file_name}")
+    unique_id = uuid.uuid4().hex  # Генеруємо унікальний ідентифікатор
+    file_path = os.path.join('temp', f"{update.message.from_user.id}_detail_{unique_id}_{document.file_name}")
     await file.download_to_drive(custom_path=file_path)
     detail_files = context.user_data.get('detail_files', [])
     detail_files.append(file_path)
     context.user_data['detail_files'] = detail_files
 
-    # Присвоюємо номер файлу
     file_numbers = context.user_data.get('file_numbers', {})
     file_number = len(file_numbers) + 1
     file_numbers[file_path] = file_number
     context.user_data['file_numbers'] = file_numbers
 
-    await update.message.reply_text(
-        f"Файл {document.file_name} отримано та присвоєно номер {file_number}. Надсилайте наступний або введіть /done, якщо завершили.")
-    return WAIT_DETAIL_FILES
+    logger.info(f"Завантажено файл: {file_path}, присвоєно номер: {file_number}")
 
+    await update.message.reply_text(
+        f"Файл {document.file_name} отримано та присвоєно номер {file_number}. "
+        "Надсилайте наступний або введіть /done, якщо завершили."
+    )
+    return WAIT_DETAIL_FILES
 
 async def done_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if 'q_part_file' not in context.user_data or not context.user_data.get('detail_files'):
@@ -125,14 +126,14 @@ async def done_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     await update.message.reply_text("Отримано всі файли деталей. Тепер надішліть файл Stanok.")
     return WAIT_STANOK_FILE
 
-
 async def handle_stanok_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     document = update.message.document
     if not (document.file_name.endswith('.xlsx') or document.file_name.endswith('.xls')):
         await update.message.reply_text("Файл Stanok має бути формату Excel (.xlsx або .xls).")
         return WAIT_STANOK_FILE
     file = await document.get_file()
-    file_path = os.path.join('temp', f"{update.message.from_user.id}_Stanok_{document.file_name}")
+    unique_id = uuid.uuid4().hex  # Генеруємо унікальний ідентифікатор
+    file_path = os.path.join('temp', f"{update.message.from_user.id}_Stanok_{unique_id}_{document.file_name}")
     await file.download_to_drive(custom_path=file_path)
     context.user_data['stanok_file'] = file_path
     await update.message.reply_text("Отримано файл Stanok. Розраховуємо результати, будь ласка, зачекайте...")
@@ -151,7 +152,7 @@ async def handle_stanok_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
             q_part_file_path,
             details_file_path_list,
             stanok_file_path,
-            file_numbers  # Передаємо номери файлів
+            file_numbers
         )
     except Exception as e:
         logger.error("Помилка при розрахунках: %s", e)
@@ -161,14 +162,12 @@ async def handle_stanok_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("Розрахунки завершено. Вкажіть, у який цех зберегти результати:")
     return WAIT_SHOP_NAME
 
-
 async def handle_shop_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     shop_name = update.message.text.strip()
     context.user_data['shop_name'] = shop_name
     await update.message.reply_text("Бажаєте створити новий цех чи відредагувати існуючий?\n"
                                     "Введіть 'створити' або 'редагувати'.")
     return WAIT_SHOP_ACTION
-
 
 async def handle_shop_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     action = update.message.text.strip().lower()
@@ -203,11 +202,9 @@ async def handle_shop_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     return ConversationHandler.END
 
-
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Операцію скасовано.")
     return ConversationHandler.END
-
 
 async def mywork(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.message.from_user.id
@@ -223,7 +220,6 @@ async def mywork(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             response += f"- {os.path.basename(f)}\n"
         response += "\n"
     await update.message.reply_text(response)
-
 
 def main():
     TOKEN = "7652010552:AAEsK-3yjz3C2Cmx4oITA7Ap4hsE3VaAbmQ"  # Замініть на ваш фактичний токен
@@ -252,9 +248,9 @@ def main():
     application.add_handler(CommandHandler('mywork', mywork))
     application.run_polling()
 
-
 if __name__ == '__main__':
     main()
+
 
 
 

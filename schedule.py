@@ -20,7 +20,7 @@ class ScheduleRec:
         self.machineInstance = machineInstance
         self.T_start = T_start
         self.T_finish = T_finish
-        self.fileNumber = fileNumber  # Додаємо fileNumber
+        self.fileNumber = fileNumber
 
 class JobRec:
     def __init__(self, partID=0, batchNo=0, batchSize=0,
@@ -32,19 +32,25 @@ class JobRec:
         self.readyTime = readyTime
 
 def ReadBatchData(q_part_file_path):
+    logger.info(f"Зчитування даних з файлу Q_part: {q_part_file_path}")
     wsQ = pd.read_excel(q_part_file_path, sheet_name='Q_part', header=0)
     PartNames = wsQ.iloc[:, 0].astype(str).str.strip().str.lower().tolist()
     BatchQty = wsQ.iloc[:, 1].fillna(1).astype(int).tolist()
     BatchVolume = wsQ.iloc[:, 2].fillna(1).astype(int).tolist()
-    return PartNames, BatchQty, BatchVolume
+    # Створюємо словники для кількості та обсягу партії
+    qty_dict = dict(zip(PartNames, BatchQty))
+    volume_dict = dict(zip(PartNames, BatchVolume))
+    return qty_dict, volume_dict
 
 def ReadProcessingData(details_file_path_list, PartNames, file_numbers):
+    logger.info("Зчитування даних з файлів деталей")
     ProcessingTimeArr = {}
     MachineAssign = {}
     partOpsCount = {}
-    partOpFileMapping = {}  # Новий словник для збереження номера файлу для кожної операції
+    partOpFileMapping = {}
 
     for details_file_path in details_file_path_list:
+        logger.info(f"Обробка файлу деталей: {details_file_path}")
         try:
             xls = pd.ExcelFile(details_file_path)
         except Exception as e:
@@ -53,10 +59,12 @@ def ReadProcessingData(details_file_path_list, PartNames, file_numbers):
         file_number = file_numbers.get(details_file_path, 0)
         for sheet_name in xls.sheet_names:
             part_name = sheet_name.strip().lower()
+            part_key = f"{part_name}_file{file_number}"  # Унікальний ключ для деталі з файлу
             if part_name not in PartNames:
+                logger.warning(f"Деталь '{part_name}' не знайдено в Q_part. Пропускаємо.")
                 continue
             wsPart = pd.read_excel(details_file_path, sheet_name=sheet_name, header=None)
-            op_index = 0  # Локальний індекс операції в межах деталі
+            op_index = 0  # Початковий індекс операції для кожної деталі
             for op_row in range(2, wsPart.shape[0]):
                 machine_name = str(wsPart.iloc[op_row, 0]).strip()
                 if machine_name == '':
@@ -68,20 +76,27 @@ def ReadProcessingData(details_file_path_list, PartNames, file_numbers):
                         continue
                     op_time_value = float(op_time)
 
+                    # Ініціалізуємо списки, якщо необхідно
+                    if part_key not in ProcessingTimeArr:
+                        ProcessingTimeArr[part_key] = []
+                        MachineAssign[part_key] = []
+                        partOpsCount[part_key] = 0
+
                     # Додаємо дані про операцію
-                    ProcessingTimeArr.setdefault(part_name, []).append(op_time_value)
-                    MachineAssign.setdefault(part_name, []).append(machine_name)
-                    partOpsCount[part_name] = partOpsCount.get(part_name, 0) + 1
+                    ProcessingTimeArr[part_key].append(op_time_value)
+                    MachineAssign[part_key].append(machine_name)
+                    op_total_index = partOpsCount[part_key]
 
                     # Зберігаємо номер файлу для кожної операції
-                    op_total_index = partOpsCount[part_name] - 1  # Загальний індекс операції
-                    key = (part_name, op_total_index)
+                    key = (part_key, op_total_index)
                     partOpFileMapping[key] = file_number
 
-                    op_index += 1  # Збільшуємо локальний індекс операції
+                    partOpsCount[part_key] += 1
+                    op_index += 1  # Збільшуємо індекс операції
     return ProcessingTimeArr, MachineAssign, partOpsCount, partOpFileMapping
 
 def ReadMachineData(stanok_file_path):
+    logger.info(f"Зчитування даних з файлу Stanok: {stanok_file_path}")
     wsStanok = pd.read_excel(stanok_file_path, sheet_name='Stanok', header=0)
     machineAvailability = {}
     machineInstances = []
@@ -95,94 +110,72 @@ def ReadMachineData(stanok_file_path):
                 machineInstances.append(f"{machine_name}{instIdx}")
     return machineAvailability, machineInstances
 
-def ComputeDynamicSchedule(PartNames, BatchQty, BatchVolume, ProcessingTimeArr,
+def ComputeDynamicSchedule(qty_dict, volume_dict, ProcessingTimeArr,
                            MachineAssign, partOpsCount, machineAvailability, partOpFileMapping):
-    jobs = []
-    partsCount = len(PartNames)
-    totalOpsCount = max(partOpsCount.values()) if partOpsCount else 0
+    logger.info("Початок розрахунку динамічного розкладу")
 
-    # Розрахунок кількості партій для кожної деталі
-    numBatches = {}
-    for p in range(partsCount):
-        qty = BatchQty[p]
-        volume = BatchVolume[p]
+    # Отримуємо список унікальних part_keys
+    part_keys = list(ProcessingTimeArr.keys())
+    partsCount = len(part_keys)
+
+    # Створюємо відображення між part_key і індексом
+    partKeyToIndex = {part_key: idx for idx, part_key in enumerate(part_keys)}
+    indexToPartKey = {idx: part_key for part_key, idx in partKeyToIndex.items()}
+
+    # Створюємо список черг для кожної деталі
+    job_queues = [[] for _ in range(partsCount)]
+    part_indices = [0] * partsCount
+    total_jobs_remaining = 0
+
+    for idx, part_key in enumerate(part_keys):
+        original_part_name = part_key.split('_file')[0]
+        qty = qty_dict.get(original_part_name, 0)
+        if qty == 0:
+            logger.warning(f"Деталь '{original_part_name}' не має кількості у файлі Q_part. Пропускаємо.")
+            continue
+        volume = volume_dict.get(original_part_name, 1)
         num_batches = qty // volume
         if qty % volume != 0:
             num_batches += 1
-        numBatches[p] = num_batches
-
-    # Створення списку jobs
-    for p in range(partsCount):
-        nb = numBatches[p]
-        qty = BatchQty[p]
-        volume = BatchVolume[p]
-        r = qty % volume
-        for batch in range(1, nb + 1):
-            if (batch == nb) and (r != 0):
+        r = qty % volume if qty % volume != 0 else volume
+        for batch in range(1, num_batches + 1):
+            if (batch == num_batches) and (qty % volume != 0):
                 batch_size = r
             else:
                 batch_size = volume
-            jobs.append(JobRec(
-                partID=p,
+            job = JobRec(
+                partID=idx,
                 batchNo=batch,
                 batchSize=batch_size,
                 NextOp=1,
-                readyTime=0.0  # Для перших операцій readyTime = 0
-            ))
+                readyTime=0.0
+            )
+            job_queues[idx].append(job)
+            total_jobs_remaining += 1
 
     scheduleRecArray = []
     machineUsage = {machine: times[:] for machine, times in machineAvailability.items()}
 
-    while True:
-        # 1. Обчислюємо globalTime
-        machine_times = [min(times) for times in machineUsage.values() if times]
-        job_ready_times = [job.readyTime for job in jobs if job.NextOp <= totalOpsCount]
-        if machine_times or job_ready_times:
-            globalTime = min(machine_times + job_ready_times)
-        else:
-            break  # Немає доступних станків або job
+    while total_jobs_remaining > 0:
+        for idx in range(partsCount):
+            if total_jobs_remaining == 0:
+                break
 
-        # 2. Знаходимо readyFilterBatch
-        ready_batches = [
-            job.batchNo for job in jobs
-            if job.NextOp <= totalOpsCount and job.readyTime <= globalTime
-        ]
-        if ready_batches:
-            readyFilterBatch = min(ready_batches)
-            jobIsReadyFound = True
-        else:
-            jobIsReadyFound = False
-
-        # 3. Визначення filterBatch
-        if jobIsReadyFound:
-            filterBatch = readyFilterBatch
-        else:
-            unfinished_batches = [job.batchNo for job in jobs if job.NextOp <= totalOpsCount]
-            if not unfinished_batches:
-                break  # Всі job завершені
-            filterBatch = min(unfinished_batches)
-
-        # 4. Перебір кандидатів
-        jobsRemaining = 0
-        bestCandidateFinish = float('inf')
-        bestJobIndex = -1
-        bestJob = None
-        bestOpStart = None
-        bestMachineName = None
-        bestMachineIndex = None
-
-        for idx, job in enumerate(jobs):
-            if job.NextOp > totalOpsCount or job.batchNo != filterBatch:
+            queue = job_queues[idx]
+            if part_indices[idx] >= len(queue):
                 continue
 
-            jobsRemaining += 1
+            job = queue[part_indices[idx]]
+            part_key = indexToPartKey[job.partID]
             opNum = job.NextOp - 1
-            partName = PartNames[job.partID]
-            if partName not in MachineAssign or opNum >= len(MachineAssign[partName]):
+
+            if opNum >= len(MachineAssign.get(part_key, [])):
+                part_indices[idx] += 1
+                total_jobs_remaining -= 1
                 continue
 
-            reqMachine = MachineAssign[partName][opNum]
-            procTime_i = job.batchSize * ProcessingTimeArr[partName][opNum]
+            reqMachine = MachineAssign[part_key][opNum]
+            procTime_i = job.batchSize * ProcessingTimeArr[part_key][opNum]
 
             if reqMachine == '':
                 candidateStart = job.readyTime
@@ -195,67 +188,52 @@ def ComputeDynamicSchedule(PartNames, BatchQty, BatchVolume, ProcessingTimeArr,
                 candidateStart = max(job.readyTime, earliestTime)
                 candidateFinish = candidateStart + procTime_i
 
-            if candidateFinish < bestCandidateFinish:
-                bestCandidateFinish = candidateFinish
-                bestJobIndex = idx
-                bestJob = job
-                bestOpStart = candidateStart
-                bestMachineName = reqMachine
-                bestMachineIndex = candidateMachineIndex
+            finishTime = candidateFinish
 
-        if jobsRemaining == 0 or bestJobIndex == -1:
-            break
+            key = (part_key, opNum)
+            fileNumber = partOpFileMapping.get(key, 0)
 
-        # 5. Виконуємо операцію для вибраного job
-        opNum = bestJob.NextOp - 1
-        partName = PartNames[bestJob.partID]
-        finishTime = bestOpStart + (bestJob.batchSize * ProcessingTimeArr[partName][opNum])
+            # Отримуємо оригінальну назву деталі
+            original_part_name = part_key.split('_file')[0]
 
-        # Отримуємо номер файлу для операції
-        key = (partName, opNum)
-        fileNumber = partOpFileMapping.get(key, 0)
+            scheduleRecArray.append(ScheduleRec(
+                PartName=f"{original_part_name} (Партія {job.batchNo})",
+                opNum=job.NextOp,
+                machine=reqMachine,
+                machineInstance=candidateMachineIndex + 1 if candidateMachineIndex is not None else 0,
+                T_start=candidateStart,
+                T_finish=finishTime,
+                fileNumber=fileNumber
+            ))
 
-        scheduleRecArray.append(ScheduleRec(
-            PartName=f"{partName} (Партія {bestJob.batchNo})",
-            opNum=bestJob.NextOp,
-            machine=bestMachineName,
-            machineInstance=bestMachineIndex + 1 if bestMachineIndex is not None else 0,
-            T_start=bestOpStart,
-            T_finish=finishTime,
-            fileNumber=fileNumber  # Додаємо номер файлу
-        ))
+            if reqMachine != '':
+                machineUsage[reqMachine][candidateMachineIndex] = finishTime
 
-        # Оновлюємо час доступності станка
-        if bestMachineName != '':
-            machineUsage[bestMachineName][bestMachineIndex] = finishTime
+            job.readyTime = finishTime
+            job.NextOp += 1
 
-        # Оновлюємо параметри обраного job
-        bestJob.readyTime = finishTime
-        bestJob.NextOp += 1
-
-        # Видаляємо job, якщо всі операції виконані
-        if bestJob.NextOp > partOpsCount.get(partName, 0):
-            jobs.pop(bestJobIndex)
-
-    # Обчислення makespan
+            if job.NextOp > partOpsCount.get(part_key, 0):
+                part_indices[idx] += 1
+                total_jobs_remaining -= 1
     makespan = max((rec.T_finish for rec in scheduleRecArray), default=0.0)
 
     return makespan, scheduleRecArray
 
 def DrawGanttChartTable(scheduleArray, makespan, machineInstances, output_filename='GanttChart.xlsx'):
+    logger.info("Побудова діаграми Ганта")
     wb = Workbook()
     ws = wb.active
     ws.title = "GanttChart"
 
-    # Обчислюємо максимальну тривалість (округлено до хв)
+    # Обчислюємо максимальну тривалість (округлено до хвилини)
     maxMinutes = int(np.ceil(makespan))
 
-    # Розбиваємо часову ось на інтервали по 10 хв
+    # Розбиваємо часову ось на інтервали по 10 хвилин
     totalIntervals = maxMinutes // 10
     if maxMinutes % 10 > 0:
         totalIntervals += 1
 
-    # Створення заголовків для годин (кожні 6 інтервалів = 1 год)
+    # Створення заголовків для годин (кожні 6 інтервалів = 1 година)
     totalHours = int(np.ceil(totalIntervals / 6))
     for hr in range(totalHours):
         colStart = (hr * 6) + 2
@@ -265,7 +243,7 @@ def DrawGanttChartTable(scheduleArray, makespan, machineInstances, output_filena
         cell.value = f"{hr:02d}:00"
         cell.alignment = Alignment(horizontal='center', vertical='center')
 
-    # Заголовки для інтервалів по 10 хв (другий рядок)
+    # Заголовки для інтервалів по 10 хвилин (другий рядок)
     for minVal in range(0, totalIntervals * 10, 10):
         col = (minVal // 10) + 2
         hourPart = minVal // 60
@@ -311,7 +289,7 @@ def DrawGanttChartTable(scheduleArray, makespan, machineInstances, output_filena
             hex_color = color_map[part_identifier]
         fill_color = PatternFill(start_color=hex_color, end_color=hex_color, fill_type="solid")
 
-        # Оновлюємо значення комірки, додаючи номер файлу
+        # Встановлюємо значення комірки з інформацією про операцію
         cell_value = f"{rec.PartName} [Файл {rec.fileNumber}], Оп{rec.opNum}"
 
         ws.merge_cells(start_row=machineRow, start_column=startCol, end_row=machineRow, end_column=endCol)
@@ -330,44 +308,53 @@ def DrawGanttChartTable(scheduleArray, makespan, machineInstances, output_filena
         idlePercentage = (totalIdleTime / maxMinutes) * 100 if maxMinutes > 0 else 0
 
         machineRow = machineInstances.index(machineKey) + 3
-        idleCell = ws.cell(row=machineRow, column=(maxMinutes // 10) + 3)
-        idleCell.value = f"Idle: {idlePercentage:.2f}%"
+        idleCell = ws.cell(row=machineRow, column=(totalIntervals + 2))
+        idleCell.value = f"Простій: {idlePercentage:.2f}%"
         idleCell.alignment = Alignment(horizontal='center')
 
     # Форматування діаграми
     thin_border = Border(left=Side(style='thin'), right=Side(style='thin'),
                          top=Side(style='thin'), bottom=Side(style='thin'))
     for row in ws.iter_rows(min_row=1, max_row=ws.max_row,
-                            min_col=1, max_col=(maxMinutes // 10) + 3):
+                            min_col=1, max_col=(totalIntervals + 2)):
         for cell in row:
             cell.border = thin_border
 
     # Встановлення ширини стовпців
     columnWidth = 2
-    for col in range(2, (maxMinutes // 10) + 3):
+    for col in range(2, (totalIntervals + 3)):
         col_letter = get_column_letter(col)
         ws.column_dimensions[col_letter].width = columnWidth
 
     # Додавання товстих вертикальних ліній кожні 6 колонок (1 година)
-    for blockStartCol in range(2, (maxMinutes // 10) + 3, 6):
+    for blockStartCol in range(2, (totalIntervals + 3), 6):
         col_letter = get_column_letter(blockStartCol)
         for row in range(1, ws.max_row + 1):
             cell = ws.cell(row=row, column=blockStartCol)
-            cell.border = Border(left=Side(style='thick'))
+            border_sides = cell.border
+            cell.border = Border(
+                left=Side(style='thick'),
+                right=border_sides.right,
+                top=border_sides.top,
+                bottom=border_sides.bottom
+            )
 
     # Збереження файлу
     wb.save(output_filename)
+    logger.info(f"Діаграму Ганта збережено у файл: {output_filename}")
 
 def FindOptimalLoadingDiagram(q_part_file_path, details_file_path_list, stanok_file_path, file_numbers):
+    logger.info("Початок процесу знаходження оптимального розкладу")
     # Зчитування даних
-    PartNames, BatchQty, BatchVolume = ReadBatchData(q_part_file_path)
-    ProcessingTimeArr, MachineAssign, partOpsCount, partOpFileMapping = ReadProcessingData(details_file_path_list, PartNames, file_numbers)
+    qty_dict, volume_dict = ReadBatchData(q_part_file_path)
+    PartNames = qty_dict.keys()
+    ProcessingTimeArr, MachineAssign, partOpsCount, partOpFileMapping = ReadProcessingData(
+        details_file_path_list, PartNames, file_numbers)
     machineAvailability, machineInstances = ReadMachineData(stanok_file_path)
 
     # Розрахунок розкладу
     makespan, scheduleRecArray = ComputeDynamicSchedule(
-        PartNames, BatchQty, BatchVolume,
-        ProcessingTimeArr, MachineAssign, partOpsCount, machineAvailability, partOpFileMapping
+        qty_dict, volume_dict, ProcessingTimeArr, MachineAssign, partOpsCount, machineAvailability, partOpFileMapping
     )
 
     # Генерування діаграми Ганта
@@ -375,4 +362,3 @@ def FindOptimalLoadingDiagram(q_part_file_path, details_file_path_list, stanok_f
     output_filename = f'GanttChart_{timestamp}.xlsx'
     DrawGanttChartTable(scheduleRecArray, makespan, machineInstances, output_filename=output_filename)
     return output_filename  # Повертаємо ім'я згенерованого файлу
-
