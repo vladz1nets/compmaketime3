@@ -2,7 +2,7 @@ import os
 import logging
 import json
 import asyncio
-import uuid  # Додаємо модуль для генерації унікальних ідентифікаторів
+import uuid  # Модуль для генерації унікальних ідентифікаторів
 import schedule as sched
 import db
 
@@ -28,7 +28,9 @@ logger = logging.getLogger(__name__)
     WAIT_STANOK_FILE,
     WAIT_SHOP_NAME,
     WAIT_SHOP_ACTION,
-) = range(5)
+    WAIT_SHOP_DELETE_NAME,
+    WAIT_SHOP_DELETE_CONFIRM,
+) = range(7)
 
 # Створюємо тимчасову директорію для файлів, якщо її немає
 if not os.path.exists('temp'):
@@ -38,7 +40,10 @@ if not os.path.exists('temp'):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "Привіт! Я ваш помічник з планування виробництва.\n\n"
-        "Надішліть файл **Q_part** (Excel) або введіть назву цеху, щоб отримати результати."
+        "Надішліть файл **Q_part** (Excel) або введіть назву цеху, щоб отримати результати.\n"
+        "Також ви можете скористатися командами:\n"
+        "/mywork - переглянути ваші цехи\n"
+        "/delete_shop - видалити цех"
     )
     return WAIT_FOR_SHOP_NAME_OR_QPART
 
@@ -64,13 +69,12 @@ async def handle_qpart_or_shop_name(update: Update, context: ContextTypes.DEFAUL
                                 await update.message.reply_document(document=f)
                         else:
                             await update.message.reply_text(f"Файл {os.path.basename(result_file)} не знайдено.")
-                break
+                return ConversationHandler.END
         if not shop_found:
             await update.message.reply_text(
                 f"Цех '{shop_name}' не знайдено. Будь ласка, надішліть файл **Q_part** для нового розрахунку."
             )
             return WAIT_FOR_SHOP_NAME_OR_QPART
-        return ConversationHandler.END
     else:
         await update.message.reply_text("Будь ласка, надішліть файл **Q_part** або введіть назву цеху.")
         return WAIT_FOR_SHOP_NAME_OR_QPART
@@ -202,6 +206,58 @@ async def handle_shop_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     return ConversationHandler.END
 
+async def delete_shop_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.message.from_user.id
+    rows = db.get_user_shops(user_id)
+    if not rows:
+        await update.message.reply_text("У вас немає збережених цехів.")
+        return ConversationHandler.END
+    response = "Ваші цехи:\n"
+    for shop_name, _ in rows:
+        response += f"- {shop_name}\n"
+    await update.message.reply_text(
+        response + "\nВведіть назву цеху, який ви бажаєте видалити:"
+    )
+    return WAIT_SHOP_DELETE_NAME
+
+async def handle_shop_delete_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    shop_name = update.message.text.strip()
+    user_id = update.message.from_user.id
+    context.user_data['shop_name_to_delete'] = shop_name
+
+    # Перевіряємо, чи існує цех
+    rows = db.get_user_shops(user_id)
+    shop_found = False
+    for row_shop_name, _ in rows:
+        if row_shop_name == shop_name:
+            shop_found = True
+            break
+
+    if not shop_found:
+        await update.message.reply_text(f"Цех '{shop_name}' не знайдено.")
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        f"Ви впевнені, що хочете видалити цех '{shop_name}' разом із усіма результатами?\n"
+        "Введіть 'так' для підтвердження або 'ні' для скасування."
+    )
+    return WAIT_SHOP_DELETE_CONFIRM
+
+async def handle_shop_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    confirmation = update.message.text.strip().lower()
+    shop_name = context.user_data.get('shop_name_to_delete')
+    user_id = update.message.from_user.id
+
+    if confirmation == 'так':
+        success, msg = db.delete_shop(user_id, shop_name)
+        if success:
+            await update.message.reply_text(f"Цех '{shop_name}' успішно видалено разом із його результатами.")
+        else:
+            await update.message.reply_text(f"Сталася помилка при видаленні цеху '{shop_name}': {msg}")
+    else:
+        await update.message.reply_text("Видалення скасовано.")
+    return ConversationHandler.END
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Операцію скасовано.")
     return ConversationHandler.END
@@ -227,7 +283,10 @@ def main():
     application = ApplicationBuilder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
+        entry_points=[
+            CommandHandler('start', start),
+            CommandHandler('delete_shop', delete_shop_start)
+        ],
         states={
             WAIT_FOR_SHOP_NAME_OR_QPART: [
                 MessageHandler(filters.Document.ALL, handle_qpart_or_shop_name),
@@ -240,6 +299,12 @@ def main():
             WAIT_STANOK_FILE: [MessageHandler(filters.Document.ALL, handle_stanok_file)],
             WAIT_SHOP_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_shop_name)],
             WAIT_SHOP_ACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_shop_action)],
+            WAIT_SHOP_DELETE_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_shop_delete_name)
+            ],
+            WAIT_SHOP_DELETE_CONFIRM: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_shop_delete_confirm)
+            ],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
@@ -250,6 +315,8 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
 
 
 

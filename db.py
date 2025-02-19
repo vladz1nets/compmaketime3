@@ -57,5 +57,31 @@ def get_user_shops(user_id):
     conn.close()
     return rows
 
+def delete_shop(user_id, shop_name):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        # Отримуємо результати, щоб видалити пов’язані файли
+        c.execute("SELECT results FROM shops WHERE user_id=? AND shop_name=?", (user_id, shop_name))
+        row = c.fetchone()
+        if row is None:
+            conn.close()
+            return False, "Цех не знайдено."
+        results_json = row[0]
+        results_list = json.loads(results_json) if results_json else []
+        # Видаляємо файли результатів
+        for result_file in results_list:
+            if os.path.exists(result_file):
+                os.remove(result_file)
+        # Видаляємо запис з бази даних
+        c.execute("DELETE FROM shops WHERE user_id=? AND shop_name=?", (user_id, shop_name))
+        conn.commit()
+        conn.close()
+        return True, "Цех видалено."
+    except Exception as e:
+        return False, str(e)
+
 if __name__ == "__main__":
     init_db()
+
+
