@@ -278,7 +278,7 @@ async def mywork(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(response)
 
 def main():
-    TOKEN = "7652010552:AAEsK-3yjz3C2Cmx4oITA7Ap4hsE3VaAbmQ"  # Замініть на ваш фактичний токен
+    TOKEN = "7652010552:AAEsK-3yjz3C2Cmx4oITA7Ap4hsE3VaAbmQ"
 
     application = ApplicationBuilder().token(TOKEN).build()
 
